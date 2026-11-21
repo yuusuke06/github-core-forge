@@ -148,19 +148,22 @@ function commitTreeFlat(commitOid: string): Map<string, { oid: string; mode: str
   if (!obj || obj.type !== 'commit') return new Map();
   return flattenTree(parseCommit(obj.data).tree);
 }
-/** All ancestors of a commit, including itself (BFS over parents). */
+/** All ancestors of a commit, including itself. Memoized per commit oid:
+ * the object store is immutable, so a commit's ancestor set never changes,
+ * and each set is built once from its parents' cached sets. */
+const ancestorCache = new Map<string, Set<string>>();
 function ancestorsOf(tip: string): Set<string> {
-  const seen = new Set<string>();
-  const queue = [tip];
-  while (queue.length) {
-    const cur = queue.pop()!;
-    if (seen.has(cur)) continue;
-    const obj = objects.get(cur);
-    if (!obj || obj.type !== 'commit') continue;
-    seen.add(cur);
-    for (const p of parseCommit(obj.data).parents) queue.push(p);
+  const cached = ancestorCache.get(tip);
+  if (cached) return cached;
+  const result = new Set<string>([tip]);
+  const obj = objects.get(tip);
+  if (obj && obj.type === 'commit') {
+    for (const parent of parseCommit(obj.data).parents) {
+      for (const anc of ancestorsOf(parent)) result.add(anc);
+    }
   }
-  return seen;
+  ancestorCache.set(tip, result);
+  return result;
 }
 function isAncestor(anc: string, tip: string): boolean { return ancestorsOf(tip).has(anc); }
 function mergeBase(a: string, b: string): string {
@@ -434,8 +437,13 @@ async function readPack(pack: Buffer): Promise<string[]> {
   }
   return ids;
 }
+const packCache = new Map<string, Buffer>();
 function writePack(oids: Iterable<string>): Buffer {
-  const list = [...new Set(oids)].map((oid) => ({ oid, obj: objects.get(oid)! })).filter((x) => x.obj);
+  const unique = [...new Set(oids)];
+  const cacheKey = createHash('sha1').update([...unique].sort().join(' ')).digest('hex');
+  const hit = packCache.get(cacheKey);
+  if (hit) return hit;
+  const list = unique.map((oid) => ({ oid, obj: objects.get(oid)! })).filter((x) => x.obj);
   const header = Buffer.alloc(12);
   header.write('PACK', 0, 'ascii'); header.writeUInt32BE(2, 4); header.writeUInt32BE(list.length, 8);
   const parts: Buffer[] = [header];
@@ -451,7 +459,10 @@ function writePack(oids: Iterable<string>): Buffer {
     parts.push(deflateSync(obj.data, { level: 1 }));
   }
   const body = Buffer.concat(parts);
-  return Buffer.concat([body, createHash('sha1').update(body).digest()]);
+  const pack = Buffer.concat([body, createHash('sha1').update(body).digest()]);
+  if (packCache.size >= 32) packCache.clear();
+  packCache.set(cacheKey, pack);
+  return pack;
 }
 /** Wrap bytes in side-band-64k packets (band 1 = pack data). */
 function sidebandWrap(data: Buffer, band = 1): Buffer {
