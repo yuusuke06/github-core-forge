@@ -448,7 +448,7 @@ function writePack(oids: Iterable<string>): Buffer {
     while (remaining > 0) { bytes.push(first | 0x80); first = remaining & 0x7f; remaining = Math.floor(remaining / 128); }
     bytes.push(first);
     parts.push(Buffer.from(bytes));
-    parts.push(deflateSync(obj.data));
+    parts.push(deflateSync(obj.data, { level: 1 }));
   }
   const body = Buffer.concat(parts);
   return Buffer.concat([body, createHash('sha1').update(body).digest()]);
